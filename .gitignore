@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+.venv/
+.portable-build/
+build/
+presets.json
+presets.json.lock
