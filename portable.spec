@@ -20,6 +20,22 @@ icon = Path(workpath) / "app.ico"
 if not brand_mark().save(str(icon), "ICO"):
     raise RuntimeError("Could not generate the application icon.")
 
+# The 便携式降噪麦克风 driver travels inside the EXE. Release builds take the
+# Microsoft-signed package from driver\signed; driver\package is the local,
+# unsigned build from driver\build.ps1 and only installs on test machines.
+driver_files = ("NoiseMic.inf", "NoiseMic.sys", "noisemic.cat")
+driver_package = next(
+    (folder for folder in (project / "driver" / "signed", project / "driver" / "package")
+     if all((folder / name).is_file() for name in driver_files)),
+    None,
+)
+if driver_package is None:
+    print("WARNING: no driver package found; the EXE will not offer the noise reduction microphone.")
+    driver_datas = []
+else:
+    print(f"Bundling driver package from {driver_package}")
+    driver_datas = [(str(driver_package / name), "driver") for name in driver_files]
+
 version = VSVersionInfo(
     ffi=FixedFileInfo(
         filevers=(1, 0, 0, 0), prodvers=(1, 0, 0, 0), mask=0x3F, flags=0,
@@ -40,6 +56,7 @@ version = VSVersionInfo(
 analysis = Analysis(
     [str(project / "main.py")],
     pathex=[str(project)],
+    datas=driver_datas,
     excludes=[
         "scipy", "tkinter", "ssl", "_ssl", "_hashlib",
         "numpy.f2py", "numpy.testing", "numpy.random", "numpy.ma", "numpy.polynomial",

@@ -1,6 +1,18 @@
 """Portable microphone noise reduction for Windows."""
 
+import platform
 import sys
+
+
+def _skip_wmi(*_args, **_kwargs):
+    raise OSError("WMI not used")
+
+
+# Python 3.12+ asks WMI for the Windows version, and sounddevice checks
+# platform.system() on import. An unhealthy WMI service makes that hang for
+# minutes; on OSError the platform module falls back to sys.getwindowsversion().
+if hasattr(platform, "_wmi_query"):
+    platform._wmi_query = _skip_wmi
 
 from PyQt5.QtCore import QPointF, QSignalBlocker, QTimer, Qt, QUrl
 from PyQt5.QtGui import QColor, QDesktopServices, QFont, QIcon, QPainter, QPen, QPolygonF
@@ -11,13 +23,19 @@ from PyQt5.QtWidgets import (
 )
 import sounddevice as sd
 
+import driver_setup
 from live_audio import AudioDeviceError, LiveAudio, MIN_DB, audio_backends
 from monitor import INPUT_COLOR, METER_INTERVAL_MS, OUTPUT_COLOR, LevelHistory, brand_mark
 from preset_store import MicSource, PRESET_PATH, Preset, PresetError, PresetNameTaken, PresetStore
 from realtime_dsp import LEARNING_SECONDS, NoiseSettings
+from virtual_mic import VirtualMic, find_virtual_mic, is_virtual_mic
 
 
 APP_NAME = "便携式降噪软件"
+VIRTUAL_MIC_NAME = "便携式降噪麦克风"
+VIRTUAL_MIC_INTERVAL_MS = 500
+# After installing, Windows takes a moment to start the device.
+VIRTUAL_MIC_CONNECT_TRIES = 20
 WINDOW_SIZE = (800, 485)
 MIN_WINDOW_SIZE = (700, 435)
 
@@ -154,6 +172,11 @@ class Workbench(QWidget):
         self.presets = {}
         self.last_capture = None
         self.devices = {}
+        self.virtual_mic = None
+        self.mic_status = None
+        self.mic_error = ""
+        self.mic_setup = None
+        self.mic_tries = 0
         self.setObjectName("workbench")
         self.setWindowTitle(APP_NAME)
         self.setWindowIcon(QIcon(brand_mark()))
@@ -162,8 +185,13 @@ class Workbench(QWidget):
         self.timer = QTimer(self)
         self.timer.setInterval(METER_INTERVAL_MS)
         self.timer.timeout.connect(self._poll)
+        self.mic_timer = QTimer(self)
+        self.mic_timer.setInterval(VIRTUAL_MIC_INTERVAL_MS)
+        self.mic_timer.timeout.connect(self._tick_virtual_mic)
         self._load_backends()
         self._load_presets()
+        self._connect_virtual_mic()
+        self.mic_timer.start()
 
     def _build_ui(self):
         outer = QVBoxLayout(self)
@@ -263,6 +291,21 @@ class Workbench(QWidget):
 
         self.input_box = self._add_combo(layout, "麦克风")
         self.output_box = self._add_combo(layout, "输出")
+
+        virtual = QHBoxLayout()
+        virtual.setSpacing(5)
+        virtual_title = label("降噪麦克风", "muted")
+        virtual_title.setToolTip(f"其他软件可以选择「{VIRTUAL_MIC_NAME}」作为麦克风")
+        virtual.addWidget(virtual_title)
+        self.mic_state = label("检测中", "value")
+        self.mic_state.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        virtual.addWidget(self.mic_state, 1)
+        self.mic_button = button("安装", "tool")
+        self.mic_button.setAccessibleName("安装或卸载降噪麦克风")
+        self.mic_button.clicked.connect(self._change_virtual_mic)
+        virtual.addWidget(self.mic_button)
+        layout.addLayout(virtual)
+
         options = QHBoxLayout()
         options.setSpacing(9)
         self.backend_box = self._add_combo(options, "接口", 27)
@@ -376,13 +419,16 @@ class Workbench(QWidget):
                 for device in self.devices.values():
                     if device["hostapi"] != backend:
                         continue
-                    if device["max_input_channels"]:
+                    # Recording our own microphone would feed the output back in.
+                    if device["max_input_channels"] and not is_virtual_mic(device["name"]):
                         self.input_box.addItem(device["name"], device["index"])
                     if device["max_output_channels"]:
                         self.output_box.addItem(device["name"], device["index"])
                 default = sd.query_hostapis(backend)["default_input_device"]
-                index = max(0, self.input_box.findData(default))
-                if cable_line(self.input_box.itemText(index), "output") is not None:
+                index = self.input_box.findData(default)
+                # The default may be our own microphone (hidden here) or a virtual cable.
+                if index < 0 or cable_line(self.input_box.itemText(index), "output") is not None:
+                    index = max(0, index)
                     index = next(
                         (i for i in range(self.input_box.count()) if not any(
                             name in self.input_box.itemText(i).casefold()
@@ -507,12 +553,22 @@ class Workbench(QWidget):
         self._set_status(f"已删除预设「{name}」。")
 
     def _show_routing(self):
-        message = (
-            "在便携式降噪软件中选择物理麦克风，把输出送到虚拟音频线的播放端，例如 CABLE Input。\n\n"
-            "在会议或直播软件中，把麦克风切换到同一条线的录音端，例如 CABLE Output。"
-            "跟随系统默认输入的应用，可在 Windows 声音设置中将这个录音端设为默认。\n\n"
-            "保持软件运行并选择「降噪」。连接新设备后，重新打开软件可刷新设备列表。"
-        )
+        if self.virtual_mic is not None:
+            message = (
+                f"降噪麦克风已安装。启动麦克风后，降噪后的声音会实时送到「{VIRTUAL_MIC_NAME}」。\n\n"
+                f"在会议或直播软件中，把麦克风选为「{VIRTUAL_MIC_NAME}」。"
+                "跟随系统默认输入的应用，可在 Windows 声音设置中将它设为默认输入。\n\n"
+                "「输出」只用于耳机监听，选「仅显示电平」也不影响降噪麦克风。"
+                "保持软件运行并选择「降噪」。"
+            )
+        else:
+            message = (
+                "点「降噪麦克风」旁的「安装」，Windows 中会多出一个"
+                f"「{VIRTUAL_MIC_NAME}」，其他软件把它选为麦克风即可。\n\n"
+                "也可以使用虚拟音频线：把「输出」选为虚拟线的播放端，例如 CABLE Input；"
+                "在会议或直播软件中选择同一条线的录音端，例如 CABLE Output。\n\n"
+                "保持软件运行并选择「降噪」。连接新设备后，重新打开软件可刷新设备列表。"
+            )
         dialog = QMessageBox(QMessageBox.Information, "应用接入", message, QMessageBox.NoButton, self)
         dialog.setTextFormat(Qt.PlainText)
         settings = dialog.addButton("打开 Windows 声音设置", QMessageBox.ActionRole)
@@ -557,6 +613,7 @@ class Workbench(QWidget):
             else:
                 self.profile_state.setText("待学习")
                 self._set_profile_hint(f"启动后保持安静约 {LEARNING_SECONDS:g} 秒。")
+        self._refresh_virtual_mic()
 
     def _set_profile_hint(self, message, details=""):
         self.profile_hint.setText(message)
@@ -589,7 +646,9 @@ class Workbench(QWidget):
         if cable is not None and cable == cable_line(self.output_box.currentText(), "input"):
             self._warn("请在「麦克风」中选择物理麦克风。虚拟音频线的录音端供目标软件使用。")
             return
-        session = LiveAudio(microphone, self.output_box.currentData(), source.channel, self._settings())
+        session = LiveAudio(
+            microphone, self.output_box.currentData(), source.channel, self._settings(), self.virtual_mic,
+        )
         try:
             session.start(preset.profile if preset is not None else None)
         except (AudioDeviceError, sd.PortAudioError, ValueError) as error:
@@ -605,7 +664,7 @@ class Workbench(QWidget):
         self.stream_info = f"{self.backend_box.currentText()} · {session.sample_rate / 1000:g} kHz"
         if session.output_device is not None:
             self.stream_info += f" · 缓冲约 {session.delay_ms:.0f} ms"
-        else:
+        elif session.virtual_mic is None:
             self.stream_info += " · 仅显示电平"
         if preset is None:
             self._learn()
@@ -699,12 +758,129 @@ class Workbench(QWidget):
         self._set_status(message, details)
         self._refresh_controls()
 
+    # --- 降噪麦克风 (virtual microphone driver) ---------------------------------
+
+    def _connect_virtual_mic(self):
+        """Open the driver when it is installed. Never called while a session uses it."""
+        path = find_virtual_mic()
+        if path is None:
+            self._close_virtual_mic()
+        elif self.virtual_mic is None or self.virtual_mic.path != path:
+            self._close_virtual_mic()
+            try:
+                self.virtual_mic = VirtualMic(path)
+                self.mic_status = self.virtual_mic.status()
+                self.mic_error = ""
+                self.mic_tries = 0
+            except OSError as error:
+                self.virtual_mic = None
+                self.mic_error = error.strerror or str(error)
+        self._refresh_virtual_mic()
+
+    def _close_virtual_mic(self):
+        if self.virtual_mic is not None:
+            self.virtual_mic.close()
+        self.virtual_mic = None
+        self.mic_status = None
+
+    def _tick_virtual_mic(self):
+        if self.mic_setup is not None:
+            result = self.mic_setup.finished()
+            if result is None:
+                return
+            installed = result.ok and self.mic_setup.action == "install"
+            self.mic_setup = None
+            self.mic_tries = VIRTUAL_MIC_CONNECT_TRIES if installed else 0
+            self._connect_virtual_mic()
+            if result.ok:
+                self._set_status(result.message)
+            else:
+                self._set_status("降噪麦克风设置失败。", result.message)
+                self._warn(result.message)
+        elif self.virtual_mic is not None:
+            try:
+                self.mic_status = self.virtual_mic.status()
+            except OSError as error:
+                self.mic_status = None
+                self.mic_error = error.strerror or str(error)
+                if self.session is None:
+                    self._connect_virtual_mic()
+        elif self.mic_tries and self.session is None:
+            self.mic_tries -= 1
+            self._connect_virtual_mic()
+        self._refresh_virtual_mic()
+
+    def _refresh_virtual_mic(self):
+        running = self.session is not None
+        installed = self.virtual_mic is not None
+        failure = self.virtual_mic.failure if installed else None
+        if self.mic_setup is not None:
+            text, tip = "处理中…", "正在等待管理员权限的安装程序完成。"
+        elif installed and running and (failure or self.mic_status is None):
+            text, tip = "输出失败", failure or self.mic_error or "无法连接降噪麦克风。"
+        elif installed and running:
+            busy = self.mic_status.in_use
+            text = "使用中" if busy else "输出中"
+            tip = (f"有应用正在从「{VIRTUAL_MIC_NAME}」录音。" if busy
+                   else f"在其他软件中选择「{VIRTUAL_MIC_NAME}」即可收到降噪声音。")
+        elif installed:
+            text, tip = "已安装", f"启动麦克风后，降噪声音会送到「{VIRTUAL_MIC_NAME}」。"
+        elif self.mic_tries:
+            text, tip = "启动中…", "Windows 正在启动降噪麦克风。"
+        else:
+            text, tip = "未安装", self.mic_error or f"安装后 Windows 中会出现「{VIRTUAL_MIC_NAME}」。"
+        self.mic_state.setText(text)
+        self.mic_state.setToolTip(tip)
+
+        package = driver_setup.package_dir()
+        self.mic_button.setText("卸载" if installed else "安装")
+        if running:
+            self.mic_button.setToolTip("停止麦克风后才能安装或卸载。")
+        elif not installed and package is None:
+            self.mic_button.setToolTip("这个版本没有附带降噪麦克风驱动。")
+        else:
+            self.mic_button.setToolTip(f"{'卸载' if installed else '安装'}「{VIRTUAL_MIC_NAME}」，需要管理员权限。")
+        self.mic_button.setEnabled(
+            self.mic_setup is None and not running and not self.mic_tries and (installed or package is not None)
+        )
+
+    def _change_virtual_mic(self):
+        if self.session is not None or self.mic_setup is not None:
+            return
+        if self.virtual_mic is not None:
+            if not self._confirm(f"卸载「{VIRTUAL_MIC_NAME}」？正在使用它的软件会失去这个麦克风。"):
+                return
+            action = "uninstall"
+            # An open handle would keep Windows from removing the device.
+            self._close_virtual_mic()
+        else:
+            if not self._confirm(
+                f"安装「{VIRTUAL_MIC_NAME}」驱动？\n\n"
+                "安装后，其他软件可以把它选为麦克风，收到这里降噪后的声音。Windows 会请求管理员权限。"
+            ):
+                return
+            action = "install"
+        try:
+            self.mic_setup = driver_setup.ElevatedSetup(action, int(self.winId()))
+        except OSError as error:
+            self._set_status(error.strerror or str(error))
+            self._connect_virtual_mic()
+            return
+        self._set_status("正在安装降噪麦克风…" if action == "install" else "正在卸载降噪麦克风…")
+        self._refresh_virtual_mic()
+
     def closeEvent(self, event):
         self._stop()
+        self.mic_timer.stop()
+        self._close_virtual_mic()
         event.accept()
 
 
 def main():
+    if driver_setup.SETUP_FLAG in sys.argv:
+        # The elevated copy started by the 安装 / 卸载 button: no window.
+        index = sys.argv.index(driver_setup.SETUP_FLAG)
+        sys.exit(driver_setup.run_setup(sys.argv[index + 1:]))
     QApplication.setAttribute(Qt.AA_EnableHighDpiScaling)
     QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
     app = QApplication(sys.argv)

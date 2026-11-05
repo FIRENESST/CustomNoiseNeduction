@@ -50,11 +50,13 @@ class Reading:
 
 
 class LiveAudio:
-    def __init__(self, input_device, output_device, channel, settings):
+    def __init__(self, input_device, output_device, channel, settings, virtual_mic=None):
         self.input_device = input_device
         self.output_device = output_device
         self.channel = channel
         self.settings = settings
+        # Receives every processed block; other apps record it as a microphone.
+        self.virtual_mic = virtual_mic
         self.stream = None
         self.reducer = None
         self.reading = Reading()
@@ -87,6 +89,8 @@ class LiveAudio:
             if profile is not None:
                 self.reducer.use_profile(profile)
                 self.reading = Reading(profile=profile)
+            if self.virtual_mic is not None:
+                self.virtual_mic.begin(rate)
             options = dict(samplerate=rate, blocksize=self.reducer.hop, dtype="float32", latency="low")
             try:
                 if speaker is None:
@@ -149,6 +153,8 @@ class LiveAudio:
         if not settings.bypass and settings.strength and not self.reducer.has_profile:
             result.fill(0)
         np.clip(result, -1.0, 1.0, out=result)
+        if self.virtual_mic is not None:
+            self.virtual_mic.push(result)
         previous = self.reading
         self.reading = Reading(
             max(_level(mono), previous.input_db - 1.0),

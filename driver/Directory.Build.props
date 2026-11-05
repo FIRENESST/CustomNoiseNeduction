@@ -1,0 +1,10 @@
+<Project>
+  <!-- WDK and SDK from NuGet; build.ps1 restores them into driver\packages. -->
+  <PropertyGroup>
+    <NoiseMicWdkVersion>10.0.28000.2526</NoiseMicWdkVersion>
+    <NoiseMicPackages>$(MSBuildThisFileDirectory)packages\</NoiseMicPackages>
+  </PropertyGroup>
+  <Import Project="$(NoiseMicPackages)Microsoft.Windows.WDK.x64.$(NoiseMicWdkVersion)\build\native\Microsoft.Windows.WDK.x64.props" Condition="'$(Platform)' == 'x64'" />
+  <Import Project="$(NoiseMicPackages)Microsoft.Windows.SDK.CPP.x64.$(NoiseMicWdkVersion)\build\native\Microsoft.Windows.SDK.cpp.x64.props" Condition="'$(Platform)' == 'x64'" />
+  <Import Project="$(NoiseMicPackages)Microsoft.Windows.SDK.CPP.$(NoiseMicWdkVersion)\build\native\Microsoft.Windows.SDK.cpp.props" />
+</Project>
