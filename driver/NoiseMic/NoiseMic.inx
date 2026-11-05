@@ -1,0 +1,181 @@
+;
+; NoiseMic.inf - virtual microphone fed by the portable noise reduction app.
+; Based on the Microsoft SimpleAudioSample driver (MS-PL).
+;
+; This template is UTF-8 for readable diffs. build.ps1 stamps it and writes
+; the UTF-16 NoiseMic.inf that Windows needs for the Chinese strings.
+;
+
+[Version]
+Signature   = "$Windows NT$"
+Class       = MEDIA
+Provider    = %ProviderName%
+ClassGUID   = {4d36e96c-e325-11ce-bfc1-08002be10318}
+DriverVer   = 11/05/2026,1.0.0.0
+CatalogFile = NoiseMic.cat
+PnpLockDown = 1
+
+[SourceDisksNames]
+222 = %DiskName%,"",222
+
+[SourceDisksFiles]
+NoiseMic.sys = 222
+
+[Manufacturer]
+%MfgName% = NoiseMic, NT$ARCH$.10.0...19041
+
+[NoiseMic.NT$ARCH$.10.0...19041]
+%NoiseMic.DeviceDesc% = NoiseMic_Device, Root\PortableNoiseMic
+
+[DestinationDirs]
+NoiseMic_Device.CopyList = 13 ; 13 = package's driver store directory
+
+;======================================================
+; NoiseMic_Device
+;======================================================
+[NoiseMic_Device.CopyList]
+NoiseMic.sys
+
+[NoiseMic_Device.AddReg]
+HKR,,AssociatedFilters,,"wdmaud,swmidi,redbook"
+HKR,,Driver,,NoiseMic.sys
+
+HKR,PowerSettings,SingleComponentMultiFxStates,3,1,0,0,0
+HKR,PowerSettings,ConservationIdleTime,3,3,0,0,0
+HKR,PowerSettings,PerformanceIdleTime,3,3,0,0,0
+HKR,PowerSettings,IdlePowerState,3,3,0,0,0
+
+HKR,Drivers,SubClasses,,"wave,midi,mixer"
+
+HKR,Drivers\wave\wdmaud.drv,Driver,,wdmaud.drv
+HKR,Drivers\midi\wdmaud.drv,Driver,,wdmaud.drv
+HKR,Drivers\mixer\wdmaud.drv,Driver,,wdmaud.drv
+
+HKR,Drivers\wave\wdmaud.drv,Description,,%NoiseMic.DeviceDesc%
+HKR,Drivers\mixer\wdmaud.drv,Description,,%NoiseMic.DeviceDesc%
+
+;======================================================
+; capture interfaces: noise reduction microphone
+;======================================================
+[NoiseMic.I.WaveNoiseMic]
+AddReg = NoiseMic.I.WaveNoiseMic.AddReg
+
+[NoiseMic.I.WaveNoiseMic.AddReg]
+HKR,,CLSID,,%Proxy.CLSID%
+HKR,,FriendlyName,,%NoiseMic.WaveNoiseMic.szPname%
+
+[NoiseMic.I.TopologyNoiseMic]
+AddReg = NoiseMic.I.TopologyNoiseMic.AddReg
+
+[NoiseMic.I.TopologyNoiseMic.AddReg]
+HKR,,CLSID,,%Proxy.CLSID%
+HKR,,FriendlyName,,%NoiseMic.TopologyNoiseMic.szPname%
+
+HKR,EP\0,%PKEY_AudioEndpoint_Association%,,%KSNODETYPE_ANY%
+
+; Opt in to pull mode.
+HKR,EP\0,%PKEY_AudioEndpoint_Supports_EventDriven_Mode%,0x00010001,0x1
+
+;======================================================
+; NoiseMic_Device install
+;======================================================
+[NoiseMic_Device.NT]
+Include   = ks.inf, wdmaudio.inf
+Needs     = KS.Registration, WDMAUDIO.Registration
+CopyFiles = NoiseMic_Device.CopyList
+AddReg    = NoiseMic_Device.AddReg
+
+[NoiseMic_Device.NT.Interfaces]
+AddInterface = %KSCATEGORY_AUDIO%,    %KSNAME_WaveNoiseMic%,     NoiseMic.I.WaveNoiseMic
+AddInterface = %KSCATEGORY_REALTIME%, %KSNAME_WaveNoiseMic%,     NoiseMic.I.WaveNoiseMic
+AddInterface = %KSCATEGORY_CAPTURE%,  %KSNAME_WaveNoiseMic%,     NoiseMic.I.WaveNoiseMic
+AddInterface = %KSCATEGORY_AUDIO%,    %KSNAME_TopologyNoiseMic%, NoiseMic.I.TopologyNoiseMic
+AddInterface = %KSCATEGORY_TOPOLOGY%, %KSNAME_TopologyNoiseMic%, NoiseMic.I.TopologyNoiseMic
+
+[NoiseMic_Device.NT.Services]
+AddService = NoiseMic, 0x00000002, NoiseMic_Service_Inst
+
+[NoiseMic_Service_Inst]
+DisplayName   = %NoiseMic.SvcDesc%
+ServiceType   = 1
+StartType     = 3
+ErrorControl  = 1
+ServiceBinary = %13%\NoiseMic.sys
+
+[NoiseMic_Device.NT.HW]
+AddReg = AUDIOHW.AddReg
+
+[AUDIOHW.AddReg]
+; FILE_DEVICE_SOUND
+HKR,,DeviceType,0x10001,0x0000001D
+; SDDL_DEVOBJ_SYS_ALL_ADM_RWX_WORLD_RWX_RES_RWX: the app opens the filter as a normal user.
+HKR,,Security,,"D:P(A;;GA;;;SY)(A;;GRGWGX;;;BA)(A;;GRGWGX;;;WD)(A;;GRGWGX;;;RC)"
+
+;======================================================
+; WDF
+;======================================================
+[NoiseMic_Device.NT.Wdf]
+KmdfService = NoiseMic, NoiseMic_WdfSect
+
+[NoiseMic_WdfSect]
+KmdfLibraryVersion = $KMDFVERSION$
+
+;======================================================
+; COMMON
+;======================================================
+[Strings]
+
+; Non-localizable
+
+KSNAME_WaveNoiseMic     = "WaveNoiseMic"
+KSNAME_TopologyNoiseMic = "TopologyNoiseMic"
+
+Proxy.CLSID          = "{17CCA71B-ECD7-11D0-B908-00A0C9223196}"
+KSCATEGORY_AUDIO     = "{6994AD04-93EF-11D0-A3CC-00A0C9223196}"
+KSCATEGORY_CAPTURE   = "{65E8773D-8F56-11D0-A3B9-00A0C9223196}"
+KSCATEGORY_REALTIME  = "{EB115FFC-10C8-4964-831D-6DCB02E6F23F}"
+KSCATEGORY_TOPOLOGY  = "{DDA54A40-1E4C-11D1-A050-405705C10000}"
+
+KSNODETYPE_ANY = "{00000000-0000-0000-0000-000000000000}"
+
+PKEY_AudioEndpoint_Association               = "{1DA5D803-D492-4EDD-8C23-E0C0FFEE7F0E},2"
+PKEY_AudioEndpoint_Supports_EventDriven_Mode = "{1DA5D803-D492-4EDD-8C23-E0C0FFEE7F0E},7"
+
+; Localizable. The app recognizes its own microphone by NoiseMic.DeviceDesc,
+; so keep virtual_mic.py's DEVICE_NAMES in step when changing it.
+
+ProviderName = "Portable Noise Reduction"
+MfgName      = "Portable Noise Reduction"
+DiskName     = "Portable Noise Reduction Mic Driver Disk"
+
+NoiseMic.DeviceDesc = "Portable Noise Reduction Mic"
+NoiseMic.SvcDesc    = "Portable Noise Reduction Mic Driver"
+
+NoiseMic.WaveNoiseMic.szPname     = "Portable Noise Reduction Mic Wave"
+NoiseMic.TopologyNoiseMic.szPname = "Portable Noise Reduction Mic Topology"
+
+[Strings.0804]
+
+KSNAME_WaveNoiseMic     = "WaveNoiseMic"
+KSNAME_TopologyNoiseMic = "TopologyNoiseMic"
+
+Proxy.CLSID          = "{17CCA71B-ECD7-11D0-B908-00A0C9223196}"
+KSCATEGORY_AUDIO     = "{6994AD04-93EF-11D0-A3CC-00A0C9223196}"
+KSCATEGORY_CAPTURE   = "{65E8773D-8F56-11D0-A3B9-00A0C9223196}"
+KSCATEGORY_REALTIME  = "{EB115FFC-10C8-4964-831D-6DCB02E6F23F}"
+KSCATEGORY_TOPOLOGY  = "{DDA54A40-1E4C-11D1-A050-405705C10000}"
+
+KSNODETYPE_ANY = "{00000000-0000-0000-0000-000000000000}"
+
+PKEY_AudioEndpoint_Association               = "{1DA5D803-D492-4EDD-8C23-E0C0FFEE7F0E},2"
+PKEY_AudioEndpoint_Supports_EventDriven_Mode = "{1DA5D803-D492-4EDD-8C23-E0C0FFEE7F0E},7"
+
+ProviderName = "便携式降噪软件"
+MfgName      = "便携式降噪软件"
+DiskName     = "便携式降噪麦克风驱动盘"
+
+NoiseMic.DeviceDesc = "便携式降噪麦克风"
+NoiseMic.SvcDesc    = "便携式降噪麦克风驱动"
+
+NoiseMic.WaveNoiseMic.szPname     = "便携式降噪麦克风 Wave"
+NoiseMic.TopologyNoiseMic.szPname = "便携式降噪麦克风 Topology"
